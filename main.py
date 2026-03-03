@@ -1,62 +1,71 @@
 import asyncio
-import logging
-from contextlib import asynccontextmanager
+import httpx
 from fastapi import FastAPI
+from models import init_db, async_session, CryptoPrice, engine
+from sqlalchemy import select
 
-from config import settings
-from client import CryptoClient
+app = FastAPI()
 
-# Настройка логирования для информационных сообщений
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+# Список монет, которые мы хотим отслеживать
+COINS = ["BTCUSDT", "ETHUSDT", "TONUSDT", "SOLUSDT", "DOGEUSDT"]
 
-client = CryptoClient()
-monitor_task = None
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global monitor_task
-    logger.info("🚀 Запуск фоновой задачи мониторинга...")
-    monitor_task = asyncio.create_task(monitor_prices())
-    yield
-    logger.info("🛑 Остановка фоновой задачи и закрытие клиента...")
-    if monitor_task:
-        monitor_task.cancel()
-        try:
-            await monitor_task
-        except asyncio.CancelledError:
-            logger.info("✅ Фоновая задача остановлена.")
-    await client.close()  # закрываем HTTP-клиент
-
-
-app = FastAPI(title="Crypto Sentinel", lifespan=lifespan)
-
-
-async def monitor_prices():
+# Функция для получения цены ОДНОЙ монеты и её записи в базу
+async def fetch_and_save(client, ticker):
     try:
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={ticker}"
+        res = await client.get(url)
+        data = res.json()
+        price = float(data['price'])
+        
+        # Создаем сессию (соединение) для записи в БД
+        async with async_session() as session:
+            # Создаем объект нашей модели с полученными данными
+            new_entry = CryptoPrice(ticker=ticker, price=price)
+            session.add(new_entry) # Кладем в «корзину»
+            await session.commit() # Сохраняем «корзину» в базу данных
+        
+        print(f"✅ {ticker}: {price} сохранено в базу")
+    except Exception as e:
+        print(f"❌ Ошибка при обработке {ticker}: {e}")
+
+# Главный бесконечный цикл мониторинга
+async def monitor_prices():
+    # Ждем, пока таблицы в БД создадутся (если их не было)
+    await init_db()
+    
+    # httpx.AsyncClient — это один «браузер», который мы открываем один раз для всех запросов
+    async with httpx.AsyncClient() as client:
         while True:
-            # Прямой асинхронный вызов (без asyncio.to_thread)
-            price = await client.get_price("BTC")
+            # Создаем список задач (tasks) для всех монет
+            # Мы не ждем каждую монету по очереди!
+            tasks = [fetch_and_save(client, coin) for coin in COINS]
+            
+            # asyncio.gather запускает все задачи из списка ОДНОВРЕМЕННО
+            # Это и есть настоящая асинхронность.
+            await asyncio.gather(*tasks)
+            
+            # Спим 10 секунд перед следующим кругом
+            await asyncio.sleep(10)
 
-            if price is not None and price < settings.BTC_THRESHOLD:
-                logger.warning(
-                    f"⚠️ BTC price dropped to ${price} (threshold ${settings.BTC_THRESHOLD})"
-                )
-            else:
-                logger.info(f"Current BTC price: ${price}")
+# Это событие запускается один раз при старте FastAPI
+@app.on_event("startup")
+async def startup_event():
+    # asyncio.create_task говорит: «Запусти функцию monitor_prices в фоне и забудь про неё».
+    # Благодаря этому сервер FastAPI может отвечать на запросы в браузере, пока монитор работает.
+    asyncio.create_task(monitor_prices())
 
-            await asyncio.sleep(settings.CHECK_INTERVAL)
-    except asyncio.CancelledError:
-        logger.info("🔄 Мониторинг завершается.")
-        raise
-
-
+# Главная страница (просто проверка, что всё ок)
 @app.get("/")
 async def root():
-    return {"message": "Crypto Sentinel is running"}
+    return {"message": "Crypto Monitoring is running", "monitored_coins": COINS}
 
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
+# Путь для получения последних цен из базы
+@app.get("/prices")
+async def get_prices():
+    async with async_session() as session:
+        # Пишем запрос: выбрать всё из CryptoPrice, сортировать по времени (новые сверху), лимит 10 штук.
+        query = select(CryptoPrice).order_by(CryptoPrice.timestamp.desc()).limit(10)
+        result = await session.execute(query)
+        prices = result.scalars().all()
+        
+        return [{"ticker": p.ticker, "price": p.price, "time": p.timestamp} for p in prices]
