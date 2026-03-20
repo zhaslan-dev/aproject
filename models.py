@@ -5,7 +5,7 @@ from datetime import datetime
 
 Base = declarative_base()
 
-class PriceRecord(Base):
+class CryptoPrice(Base):
     __tablename__ = "crypto_prices"
     id = Column(Integer, primary_key=True)
     ticker = Column(String)
