@@ -1,5 +1,6 @@
 """
-Модели SQLAlchemy для таблиц: цены криптовалют, кэш метрик, курсы валют.
+Модели таблиц базы данных с использованием SQLAlchemy ORM.
+Все операции асинхронные.
 """
 
 from sqlalchemy import Column, Integer, String, Float, DateTime
@@ -8,53 +9,68 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
 from config import settings
 
+# Базовый класс для всех моделей (декларативный стиль)
 Base = declarative_base()
 
+# ----------------------------------------------------------------------
+# Модель для хранения сырых цен криптовалют, получаемых с Binance
+# ----------------------------------------------------------------------
 class CryptoPrice(Base):
-    """Сырые цены криптовалют с Binance."""
-    __tablename__ = "crypto_prices"
+    __tablename__ = "crypto_prices"  # имя таблицы в БД
 
-    id = Column(Integer, primary_key=True)
-    ticker = Column(String, nullable=False)
-    price = Column(Float, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    id = Column(Integer, primary_key=True)          # автоинкрементный первичный ключ
+    ticker = Column(String, nullable=False)         # символ монеты (например, 'BTCUSDT')
+    price = Column(Float, nullable=False)           # цена в USDT
+    timestamp = Column(DateTime, default=datetime.utcnow)  # время сохранения (UTC)
 
+# ----------------------------------------------------------------------
+# Модель для кэшированных метрик криптовалют (рассчитываются фоновой задачей)
+# ----------------------------------------------------------------------
 class CryptoMetrics(Base):
-    """Кэшированные статистики (волатильность, RSI, SMA и т.д.) для криптовалют."""
     __tablename__ = "crypto_metrics"
 
     id = Column(Integer, primary_key=True)
     ticker = Column(String, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    period_hours = Column(Integer, default=24)
+    timestamp = Column(DateTime, default=datetime.utcnow)   # время расчёта метрики
+    period_hours = Column(Integer, default=24)              # период, за который считано
 
-    volatility = Column(Float)
-    price_change_percent = Column(Float)
+    # статистические показатели
+    volatility = Column(Float)              # волатильность (стандартное отклонение)
+    price_change_percent = Column(Float)    # изменение цены в процентах
     max_price = Column(Float)
     min_price = Column(Float)
     avg_price = Column(Float)
 
-    rsi = Column(Float, nullable=True)
-    sma_7 = Column(Float, nullable=True)
+    # технические индикаторы (могут быть NULL, если данных недостаточно)
+    rsi = Column(Float, nullable=True)      # индекс относительной силы
+    sma_7 = Column(Float, nullable=True)    # простое скользящее среднее за 7 периодов
     sma_25 = Column(Float, nullable=True)
-    ema_12 = Column(Float, nullable=True)
+    ema_12 = Column(Float, nullable=True)   # экспоненциальное среднее
     ema_26 = Column(Float, nullable=True)
 
+# ----------------------------------------------------------------------
+# Модель для хранения курсов обмена фиатных валют (например, USDT → RUB)
+# ----------------------------------------------------------------------
 class ExchangeRate(Base):
-    """Курсы обмена фиатных валют (например, USDT → RUB)."""
     __tablename__ = "exchange_rates"
 
     id = Column(Integer, primary_key=True)
-    base_currency = Column(String, nullable=False)      # 'USDT'
-    target_currency = Column(String, nullable=False)    # 'RUB', 'KZT', ...
-    rate = Column(Float, nullable=False)
+    base_currency = Column(String, nullable=False)   # базовая валюта, всегда 'USDT'
+    target_currency = Column(String, nullable=False) # целевая валюта, например 'RUB'
+    rate = Column(Float, nullable=False)             # курс обмена (сколько target_currency за 1 USDT)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
-# Асинхронный движок и фабрика сессий
+# ----------------------------------------------------------------------
+# Настройка асинхронного движка и фабрики сессий
+# ----------------------------------------------------------------------
+# Создаём асинхронный движок SQLAlchemy для работы с PostgreSQL через asyncpg
 engine = create_async_engine(settings.DATABASE_URL, echo=False)
+
+# Фабрика сессий: при вызове async_session() возвращает новую асинхронную сессию
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 async def init_db():
-    """Создаёт все таблицы при первом запуске."""
+    """Создаёт все таблицы в базе данных, если они ещё не существуют."""
     async with engine.begin() as conn:
+        # run_sync позволяет выполнить синхронную операцию metadata.create_all в асинхронном контексте
         await conn.run_sync(Base.metadata.create_all)
