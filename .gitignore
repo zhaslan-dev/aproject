@@ -1,12 +1,30 @@
 # Виртуальное окружение
 venv/
+env/
 .env
 
 # Кэш Python
 __pycache__/
-*.py[cod]
-*.log
+*.pyc
+*.pyo
 
-# Файлы IDE
-.vscode/
+# Логи и временные файлы
+*.log
+crypto_errors.log
+
+# Базы данных (если используете SQLite)
+*.db
+*.sqlite
+
+# Настройки IDE
 .idea/
+.vscode/
+*.iml
+
+# Файлы конфигурации с секретами
+.env.local
+.env.production
+
+# Сгенерированные файлы
+.pytest_cache/
+.mypy_cache/

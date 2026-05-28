@@ -1,71 +1,124 @@
 import asyncio
-import httpx
-from fastapi import FastAPI
-from models import init_db, async_session, CryptoPrice, engine
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
 from sqlalchemy import select
+from client import CryptoClient
+from models import init_db, async_session, CryptoPrice
+from config import settings
+from logger import setup_logging
+import sentry_sdk
 
-app = FastAPI()
+# Настройка логирования
+setup_logging()
+logger = logging.getLogger(__name__)
 
-# Список монет, которые мы хотим отслеживать
-COINS = ["BTCUSDT", "ETHUSDT", "TONUSDT", "SOLUSDT", "DOGEUSDT"]
+# Инициализация Sentry, если указан DSN
+if settings.SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        traces_sample_rate=1.0,
+    )
+    logger.info("Sentry initialized")
 
-# Функция для получения цены ОДНОЙ монеты и её записи в базу
-async def fetch_and_save(client, ticker):
-    try:
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={ticker}"
-        res = await client.get(url)
-        data = res.json()
-        price = float(data['price'])
-        
-        # Создаем сессию (соединение) для записи в БД
-        async with async_session() as session:
-            # Создаем объект нашей модели с полученными данными
-            new_entry = CryptoPrice(ticker=ticker, price=price)
-            session.add(new_entry) # Кладем в «корзину»
-            await session.commit() # Сохраняем «корзину» в базу данных
-        
-        print(f"✅ {ticker}: {price} сохранено в базу")
-    except Exception as e:
-        print(f"❌ Ошибка при обработке {ticker}: {e}")
+# Глобальная ссылка на фоновую задачу для graceful shutdown
+background_task = None
 
-# Главный бесконечный цикл мониторинга
-async def monitor_prices():
-    # Ждем, пока таблицы в БД создадутся (если их не было)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    global background_task
+    logger.info("Starting up...")
     await init_db()
-    
-    # httpx.AsyncClient — это один «браузер», который мы открываем один раз для всех запросов
-    async with httpx.AsyncClient() as client:
-        while True:
-            # Создаем список задач (tasks) для всех монет
-            # Мы не ждем каждую монету по очереди!
-            tasks = [fetch_and_save(client, coin) for coin in COINS]
-            
-            # asyncio.gather запускает все задачи из списка ОДНОВРЕМЕННО
-            # Это и есть настоящая асинхронность.
-            await asyncio.gather(*tasks)
-            
-            # Спим 10 секунд перед следующим кругом
-            await asyncio.sleep(10)
+    # Запускаем фоновую задачу мониторинга
+    background_task = asyncio.create_task(monitor_prices())
+    logger.info("Background monitor started")
+    yield
+    # Shutdown
+    logger.info("Shutting down...")
+    # Отменяем фоновую задачу и ждём её завершения
+    if background_task:
+        background_task.cancel()
+        try:
+            await background_task
+        except asyncio.CancelledError:
+            logger.info("Background monitor cancelled")
+    # Закрываем HTTP-клиент и движок БД
+    await client.close()
+    await engine.dispose()
+    logger.info("Resources closed")
 
-# Это событие запускается один раз при старте FastAPI
-@app.on_event("startup")
-async def startup_event():
-    # asyncio.create_task говорит: «Запусти функцию monitor_prices в фоне и забудь про неё».
-    # Благодаря этому сервер FastAPI может отвечать на запросы в браузере, пока монитор работает.
-    asyncio.create_task(monitor_prices())
+app = FastAPI(lifespan=lifespan)
 
-# Главная страница (просто проверка, что всё ок)
+# Создаём один клиент для всего приложения (будет закрыт в lifespan)
+client = CryptoClient()
+
+async def monitor_prices():
+    """Фоновая задача: периодически опрашивает цены и проверяет порог BTC."""
+    while True:
+        try:
+            # 1. Получаем цены всех монет параллельно
+            tasks = [client.get_price(coin) for coin in settings.COINS]
+            prices = await asyncio.gather(*tasks)  # список float или None
+
+            # 2. Сохраняем в БД только успешные результаты
+            async with async_session() as session:
+                for ticker, price in zip(settings.COINS, prices):
+                    if price is not None:
+                        new_entry = CryptoPrice(ticker=ticker, price=price)
+                        session.add(new_entry)
+                        logger.info(f"Fetched {ticker}: {price}")
+                    else:
+                        logger.warning(f"Failed to fetch {ticker}")
+                await session.commit()
+
+            # 3. Проверяем порог для BTC (берём первый элемент списка, ожидаем 'BTCUSDT')
+            btc_price = prices[0] if prices else None
+            if btc_price is not None and btc_price < settings.BTC_THRESHOLD:
+                msg = f"⚠️ ALERT: BTC price {btc_price} is below threshold {settings.BTC_THRESHOLD}"
+                logger.warning(msg)
+                if settings.SENTRY_DSN:
+                    sentry_sdk.capture_message(msg, level="warning")
+
+        except asyncio.CancelledError:
+            logger.info("Monitor task cancelled")
+            break
+        except Exception as e:
+            logger.exception("Unexpected error in monitor_prices")
+            if settings.SENTRY_DSN:
+                sentry_sdk.capture_exception(e)
+
+        await asyncio.sleep(settings.CHECK_INTERVAL)
+
 @app.get("/")
 async def root():
-    return {"message": "Crypto Monitoring is running", "monitored_coins": COINS}
+    return {
+        "message": "Crypto Sentinel is running",
+        "monitored_coins": settings.COINS,
+        "check_interval_sec": settings.CHECK_INTERVAL,
+        "btc_threshold": settings.BTC_THRESHOLD
+    }
 
-# Путь для получения последних цен из базы
 @app.get("/prices")
-async def get_prices():
+async def get_prices(limit: int = 10):
+    """Возвращает последние записи из БД (по умолчанию 10)"""
     async with async_session() as session:
-        # Пишем запрос: выбрать всё из CryptoPrice, сортировать по времени (новые сверху), лимит 10 штук.
-        query = select(CryptoPrice).order_by(CryptoPrice.timestamp.desc()).limit(10)
+        query = select(CryptoPrice).order_by(CryptoPrice.timestamp.desc()).limit(limit)
         result = await session.execute(query)
         prices = result.scalars().all()
-        
-        return [{"ticker": p.ticker, "price": p.price, "time": p.timestamp} for p in prices]
+        return [
+            {"ticker": p.ticker, "price": p.price, "time": p.timestamp.isoformat()}
+            for p in prices
+        ]
+
+@app.get("/health")
+async def health():
+    """Проверка работоспособности сервиса"""
+    # Проверяем, что клиент жив и БД отвечает
+    try:
+        async with async_session() as session:
+            await session.execute(select(1))
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=500, detail="Database unavailable")

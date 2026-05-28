@@ -14,9 +14,9 @@ class CryptoClient:
     async def get_price(self, ticker: str) -> float | None:
         """
         Получает цену для указанного тикера с Binance.
-        ticker ожидается в формате 'BTCUSDT' (например, 'BTC' -> 'BTCUSDT').
+        ticker ожидается в полном формате, например 'BTCUSDT'.
         """
-        symbol = f"{ticker.upper()}USDT"
+        symbol = ticker.upper()
         url = f"{self.base_url}/ticker/price"
         params = {"symbol": symbol}
 

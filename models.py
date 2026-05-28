@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, Float, DateTime
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from datetime import datetime
+from config import settings
 
 Base = declarative_base()
 
@@ -12,10 +13,10 @@ class CryptoPrice(Base):
     price = Column(Float)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
-# Замени 'PASSWORD' на свой реальный пароль от Postgres
-DATABASE_URL = "postgresql+asyncpg://crypto_user:PASSWORD@localhost/crypto_db"
+# Используем URL из настроек
+DATABASE_URL = settings.DATABASE_URL
 
-engine = create_async_engine(DATABASE_URL)
+engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 async def init_db():
