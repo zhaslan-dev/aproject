@@ -171,5 +171,3 @@ MIT License. Свободно используйте, модифицируйте
 ## Авторы
 
 Telegenov Zh. – [GitHub](https://github.com/zhaslan-dev)
-```
-
