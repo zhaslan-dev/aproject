@@ -170,6 +170,6 @@ MIT License. Свободно используйте, модифицируйте
 
 ## Авторы
 
-Ваше имя – [GitHub](https://github.com/zhaslan-dev)
+Telegenov Zh. – [GitHub](https://github.com/zhaslan-dev)
 ```
 
