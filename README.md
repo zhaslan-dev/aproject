@@ -1,6 +1,3 @@
-
-
-```markdown
 # Crypto Sentinel
 
 **Crypto Sentinel** — асинхронный микросервис на FastAPI для мониторинга криптовалют.  
@@ -39,8 +36,8 @@
 ### 1. Клонировать репозиторий
 
 ```bash
-git clone https://github.com/your-username/crypto-sentinel.git
-cd crypto-sentinel
+git clone https://github.com/zhaslan-dev/...
+cd ...
 ```
 
 ### 2. Создать виртуальное окружение
